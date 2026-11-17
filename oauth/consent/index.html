@@ -1,0 +1,136 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Family Command Center — Connect</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; background: #f8f9fb; color: #202432; margin: 0; }
+    main { max-width: 430px; margin: 9vh auto; background: white; padding: 30px; border: 1px solid #dfe3e8; border-radius: 16px; }
+    h1 { font-size: 24px; margin: 0 0 8px; }
+    p { line-height: 1.45; }
+    label { display: block; font-weight: 600; margin-top: 16px; }
+    input { width: 100%; box-sizing: border-box; padding: 12px; margin-top: 6px; border: 1px solid #a5abb7; border-radius: 8px; font: inherit; }
+    button { background: #202432; color: white; padding: 12px 16px; border: 0; border-radius: 8px; font: inherit; cursor: pointer; margin-top: 20px; }
+    button:disabled { opacity: .55; cursor: wait; }
+    .secondary { background: #e9ebef; color: #202432; margin-left: 8px; }
+    .muted { color: #51596b; font-size: 14px; overflow-wrap: anywhere; }
+    .error { color: #aa2433; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Family Command Center</h1>
+  <p class="muted">Sign in and approve access only if you started a connection from ChatGPT.</p>
+  <p id="notice" role="status" aria-live="polite">Loading…</p>
+  <form id="login" hidden>
+    <label>Email<input id="email" type="email" autocomplete="username" required></label>
+    <label>Password<input id="password" type="password" autocomplete="current-password" required></label>
+    <button id="sign-in" type="submit">Sign in</button>
+  </form>
+  <section id="consent" hidden>
+    <p><strong id="client-name"></strong> is requesting access.</p>
+    <p class="muted">Signed in as: <span id="user-email"></span></p>
+    <p class="muted">Requested scopes: <span id="scopes"></span></p>
+    <p class="muted">Return destination: <span id="return-url"></span></p>
+    <p>Only approve an app you recognize. Family data is protected separately by your database access rules.</p>
+    <button id="approve" type="button">Approve connection</button>
+    <button id="deny" class="secondary" type="button">Deny</button>
+  </section>
+</main>
+<script type="module">
+  import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.0/+esm";
+
+  // Replace BOTH placeholders with values from Supabase > Project Settings > API Keys.
+  // Only the publishable key is safe here. Never use a secret or service-role key.
+  const SUPABASE_URL = "https://flqogeoksyeroempaaph.supabase.co";
+  const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_YHo9TqGMK_xChSKETclfig_Cs9rvdnP";
+
+  const $ = id => document.getElementById(id);
+  const notify = (text, isError = false) => {
+    $("notice").textContent = text;
+    $("notice").className = isError ? "error" : "";
+  };
+  const authId = new URLSearchParams(location.search).get("authorization_id");
+
+  if (SUPABASE_URL.includes("YOUR_PROJECT_REF") || SUPABASE_PUBLISHABLE_KEY.includes("YOUR_SB_PUBLISHABLE_KEY")) {
+    notify("Page published, but Supabase URL and publishable key still need configuration.", true);
+  } else if (!authId) {
+    notify("Page is ready. Start connecting the MCP server from ChatGPT to see a sign-in request.");
+  } else {
+    const db = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+    });
+
+    async function loadConsent() {
+      $("login").hidden = true;
+      $("consent").hidden = true;
+      notify("Checking sign-in…");
+      const { data: { user } } = await db.auth.getUser();
+      if (!user) {
+        notify("Sign in with your Family Command Center application account.");
+        $("login").hidden = false;
+        return;
+      }
+
+      notify("Loading authorization request…");
+      const { data, error } = await db.auth.oauth.getAuthorizationDetails(authId);
+      if (error) throw error;
+      if (!data) throw new Error("No authorization details returned.");
+      if ("redirect_url" in data) {
+        location.replace(data.redirect_url);
+        return;
+      }
+      $("client-name").textContent = data.client?.name || "An application";
+      $("user-email").textContent = user.email || "";
+      $("scopes").textContent = data.scope || "No scopes specified";
+      $("return-url").textContent = data.redirect_uri || "Not provided";
+      notify("Review the request before deciding.");
+      $("consent").hidden = false;
+    }
+
+    $("login").addEventListener("submit", async event => {
+      event.preventDefault();
+      $("sign-in").disabled = true;
+      notify("Signing in…");
+      const password = $("password").value;
+      $("password").value = "";
+      try {
+        const { error } = await db.auth.signInWithPassword({ email: $("email").value.trim(), password });
+        if (error) throw error;
+        await loadConsent();
+      } catch (error) {
+        notify(error.message || "Sign-in failed", true);
+        $("login").hidden = false;
+      } finally {
+        $("sign-in").disabled = false;
+      }
+    });
+
+    async function decide(approve) {
+      $("approve").disabled = true;
+      $("deny").disabled = true;
+      notify(approve ? "Approving…" : "Denying…");
+      try {
+        const result = approve
+          ? await db.auth.oauth.approveAuthorization(authId, { skipBrowserRedirect: true })
+          : await db.auth.oauth.denyAuthorization(authId, { skipBrowserRedirect: true });
+        if (result.error) throw result.error;
+        if (!result.data?.redirect_url) throw new Error("No redirect URL returned.");
+        location.replace(result.data.redirect_url);
+      } catch (error) {
+        notify(error.message || "Could not process the request", true);
+        $("approve").disabled = false;
+        $("deny").disabled = false;
+      }
+    }
+
+    $("approve").addEventListener("click", () => decide(true));
+    $("deny").addEventListener("click", () => decide(false));
+    loadConsent().catch(error => notify(error.message || "Could not load consent", true));
+  }
+</script>
+</body>
+</html>
